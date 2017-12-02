@@ -5,11 +5,15 @@
 
 # This notebook defines a constructor for a Markov model class.
 
-# In[115]:
+# In[1]:
 
 # Put all the imports at the beginning
 
+import pandas as pd
 import numpy as np
+
+from collections import Counter
+from copy import deepcopy
 
 np.seterr(divide='ignore')
 
@@ -24,27 +28,26 @@ np.seterr(divide='ignore')
 # 
 # 3. A structure containing the historical paths to each node in the index.
 
-# In[116]:
+# In[2]:
 
 class MarkovState:
     
-    def __init__(self, index_ls, currentLogState_ar, paths_ls):
+    def __init__(self, currentLogState_sr, paths_df):
         
-        self.myIndex_ls=index_ls
-        self.myCurrentLogState_ar=currentLogState_ar
-        self.myPaths_ls=paths_ls
+        self.myCurrentLogState_sr=currentLogState_sr
+        self.myPaths_df=paths_df
         
     def get_log_current_state_distribution(self):
-        return self.myCurrentLogState_ar
+        return self.myCurrentLogState_sr
     
     def get_current_state_distribution(self):
-        return np.exp(self.myCurrentLogState_ar)
+        return np.exp(self.myCurrentLogState_sr)
     
     def get_index(self):
-        return self.myIndex_ls
+        return list(self.myCurrentLogState_sr.index)
     
-    def get_path_list(self):
-        return self.myPaths_ls
+    def get_path_dataframe(self):
+        return self.myPaths_df
         
     def most_likely_path(self, state):
         '''
@@ -52,17 +55,13 @@ class MarkovState:
         as found from the path history
         '''
         # Hacky, but seems to work
-        path_ls=[self.myPaths_ls[-1][self.myIndex_ls.index(state)],
-                 self.myIndex_ls.index(state)]
-
-        i=len(self.myPaths_ls)-1
-        
-        while i>0:
-            path_ls[0:0]=[self.myPaths_ls[i-1][path_ls[0]]]
-            i-=1
-
-        return [self.myIndex_ls[i] for i in path_ls]
-
+        s=state
+        o=[state]
+        for c in reversed(self.myPaths_df.columns):
+            o.append(self.myPaths_df[c][s])
+            s=self.myPaths_df[c][s]
+        o.reverse()
+        return o[1:]
 
     def most_likely_state(self, n=1):
         '''
@@ -75,52 +74,57 @@ class MarkovState:
 
 # Although it's not the only way of defining a Markov model, for the moment, I'm going to do the definition by taking arguments in the constructor that represent a distribution of transitions.
 
-# In[117]:
+# In[3]:
 
 class MarkovModel:
     
-    def __init__(self, transitions_ls, initialStates_ls=[], extraStates_ls=[]):
+    def __init__(self, transitions_ls, initialStates_ls=[]):
         '''
         Take a list of initial states, and a list of pairs of transitions
         between states. Create a Markov model based on the distribution of
         initial states, and distribution of transitions.
-        
-        extraStates_ls is a list of additional states which do not appear
-        in the two lists initialStates_ls and transitions_ls.
         
         If initialStates_ls is empty, assume an equal distribution over all
         the states obtained from the transitions and the extra states.
         '''
 
         # First, build the list of all states in the model
-        self.stateIndex_ls=list({x for x in initialStates_ls}.                                  union({x for (x, y) in transitions_ls}).                                  union({y for (x, y) in transitions_ls}).                                  union(set(extraStates_ls)))
-        self.stateIndex_ls.sort()
+        self.stateIndex_ls=list({x for x in initialStates_ls}.                                  union({x for (x, y) in transitions_ls}).                                  union({y for (x, y) in transitions_ls}))
+        self.stateIndex_ls.sort()  # Just for aesthetics
 
-        # Now build an array that contains the initial states
-        if initialStates_ls==[]:
-            initialStates_ls=self.stateIndex_ls        
-        self.initialState_ar=np.array([initialStates_ls.count(state) 
-                                       for state in self.stateIndex_ls])
+        # Now build a series that contains the initial states
+        if initialStates_ls:
+            self.initialState_sr=pd.Series(Counter(initialStates_ls),
+                                           index=self.stateIndex_ls).fillna(0)
+        else:
+            self.initialState_sr=pd.Series(Counter(self.stateIndex_ls), 
+                                           index=self.stateIndex_ls).fillna(0)
+        
         # and normalise the values so the prob.s sum to 1
-        self.initialState_ar=self.initialState_ar/np.sum(self.initialState_ar)
+        self.initialState_sr=self.initialState_sr/np.sum(self.initialState_sr)
+        
+        # And convert to a Markov State
+        self.initialState_ms=MarkovState(np.log(self.initialState_sr),
+                                         pd.DataFrame(index=self.initialState_sr.index,
+                                                      columns=[0]))
 
         # Now build an array that encodes the transitions
-        self.transitionMatrix_ar=np.zeros((len(self.stateIndex_ls), 
-                                           len(self.stateIndex_ls)), 
-                                          dtype=np.float)  # Normally int, but we're
-                                                           # going to normalise
+        self.transitionMatrix_df=pd.DataFrame(0,
+                                              index=self.stateIndex_ls,
+                                              columns=self.stateIndex_ls)
+        
         for (x, y) in transitions_ls:
-            self.transitionMatrix_ar[self.stateIndex_ls.index(x)][self.stateIndex_ls.index(y)]+=1
-        for (i, r) in enumerate(self.transitionMatrix_ar):
-            if np.sum(self.transitionMatrix_ar[i])>0:
-                self.transitionMatrix_ar[i]=self.transitionMatrix_ar[i]/sum(self.transitionMatrix_ar[i])
-
+            self.transitionMatrix_df.loc[x][y]+=1
+        for row_ix in self.transitionMatrix_df.index:
+            if not all(self.transitionMatrix_df.loc[row_ix]==0):
+                self.transitionMatrix_df.loc[row_ix]=                    self.transitionMatrix_df.loc[row_ix]/                      np.sum(self.transitionMatrix_df.loc[row_ix])
+                
         # Take the log of the transition matrix to make
         # calculations more accurate
-        self.logTransitionMatrix_ar=np.log(self.transitionMatrix_ar)
+        self.logTransitionMatrix_df=np.log(self.transitionMatrix_df)
 
         # Same for the initial states:
-        self.logInitialState_ar=np.log(self.initialState_ar)
+        self.logInitialState_sr=np.log(self.initialState_sr)
 
 
     def create_markov_state(self, statesIn_ls):
@@ -130,12 +134,14 @@ class MarkovModel:
         first step of input to the apply method.
         '''
         
-        initialStatesDist_ls=[statesIn_ls.count(s) for s in self.stateIndex_ls]
-        dist_ar=np.array(initialStatesDist_ls)/np.sum(initialStatesDist_ls)
+        statesDist_sr=pd.Series(Counter(statesIn_ls),
+                                index=self.transitionMatrix_df.index
+                               ).fillna(0)
+        statesDist_sr=statesDist_sr/np.sum(statesDist_sr)
         
-        return MarkovState(self.stateIndex_ls,
-                           np.log(dist_ar),
-                           [])
+        return MarkovState(np.log(statesDist_sr),
+                           pd.DataFrame(index=self.transitionMatrix_df.index,
+                                        columns=[0]))
         
     def apply_1(self, stateIn_ms):
         '''
@@ -144,30 +150,25 @@ class MarkovModel:
         distribution of outputs and the previous state from 
         which the next state is arrived at.
         '''
-        stateDistOut_ar=np.empty(len(self.stateIndex_ls))
-        previousStateOut_ls=[0]*len(self.stateIndex_ls)
+        logCurrentState_sr=stateIn_ms.get_log_current_state_distribution()
+        logNextState_sr=pd.Series(index=logCurrentState_sr.index)
+        previousState_sr=pd.Series(index=logCurrentState_sr.index)
         
-        # For each row in the transition matrix:
-        for (i, row) in enumerate(self.logTransitionMatrix_ar):
+        # For each column in the logged transition matrix:
+        for c in self.logTransitionMatrix_df.index:
 
             # multiply (logged) each of the transition probabilities
             # by the probability of being in that state
-            calculateTransitions_ar=stateIn_ms.get_log_current_state_distribution() +                                     self.logTransitionMatrix_ar.transpose()[i]
+            calculateTransitions_sr=logCurrentState_sr +                                     self.logTransitionMatrix_df[c]
             
-            # Find the index of the largest value (most probable transition) 
-            argmax_i=np.argmax(calculateTransitions_ar)
-
-            # and add that probability and the previous state
-            # to the output values
-            stateDistOut_ar[i]=calculateTransitions_ar[argmax_i]
-            previousStateOut_ls[i]=argmax_i
+            logNextState_sr[c]=calculateTransitions_sr.max()
+            previousState_sr[c]=calculateTransitions_sr.idxmax()
             
-        # return {'logdist':stateDistOut_ar, 
-        #         'prevstates': previousStateOut_ls}
-
-        return MarkovState(stateIn_ms.get_index(),
-                           stateDistOut_ar,
-                           stateIn_ms.get_path_list() + [previousStateOut_ls])
+        tmp_df=stateIn_ms.get_path_dataframe()
+        tmp_df[max(tmp_df.columns)+1]=previousState_sr
+            
+        return MarkovState(logNextState_sr,
+                           tmp_df)
 
     def apply(self, stateIn_ms, steps=1):
         '''
@@ -189,11 +190,11 @@ class MarkovModel:
         if not isinstance(stateIn_ms, MarkovState):
             stateIn_ms=self.create_markov_state(stateIn_ms)
     
-        # Next, let's assume that we're only doing one step
-        # at the moment
+        # Next, let's call a helper function apply_1
+        # to make the application once
         
-        stateOut_ms=stateIn_ms
-        
+        stateOut_ms=deepcopy(stateIn_ms)
+
         for i in range(steps):
             stateOut_ms=self.apply_1(stateOut_ms)
         
@@ -206,36 +207,40 @@ class MarkovModel:
         to state2
         '''
         return self.transitionMatrix_ar[self.stateIndex_ls.index(state1)][self.stateIndex_ls.index(state2)]
+    
+    def get_states(self):
+        '''
+        Return list of states in model
+        '''
+        return list(self.transitionMatrix_df.index)
+    
+    def get_initial_state(self):
+        '''
+        Return the initial states as a Markov State
+        '''
+        return self.initialState_ms
 
 
-# Now we're going to try to write some code to merge two different markov models. This isn't mathematically particularly well founded, but what the heck...
+# Now we're going to try to write some code to merge two different markov models. This isn't mathematically particularly well founded, but what the heck. It's quite a bit easier now that we've got everything in terms of dataframes.
 
-# I'm also going to write a subclass of the MarkovModel class here, which will be initialised using the transition matrix etc., rather than the distribution of state transitions:
+# Can't reconstruct the input arrays from the models themselves, so let's create a subclass of MM so we can override `__init__`:
 
-# In[118]:
+# In[4]:
 
-class MarkovModelFromArrays(MarkovModel):
-    def __init__(self, transitions_ar, initialStates_ar, index_ls):
+class MarkovModelFromTransitionMatrix(MarkovModel):
+    def __init__(self, transitionMatrixIn_df):
         '''
         Give the arrays directly. Note, this is not generally
         intended to be called by the user.
         '''
-        # provided index should be sorted
-        assert index_ls==sorted(index_ls)
-        self.stateIndex_ls=index_ls
-
-        # Store the array that contains the initial states
-        self.initialState_ar=initialStates_ar
-        # and take the log
-        self.logInitialState_ar=np.log(self.initialState_ar)
 
         # Now store the array that encodes the transitions,
-        self.transitionMatrix_ar=transitions_ar
+        self.transitionMatrix_df=transitionMatrixIn_df
         # and take the log
-        self.logTransitionMatrix_ar=np.log(self.transitionMatrix_ar)
+        self.logTransitionMatrix_df=np.log(self.transitionMatrix_df)
 
 
-# In[119]:
+# In[5]:
 
 def merge(model1, model2, weight, normalise=True):
     '''
@@ -247,43 +252,35 @@ def merge(model1, model2, weight, normalise=True):
     outputs from all nodes sum to 1 (or zero if no leaving
     arcs).
     '''
-    mergedIndex_ls=sorted(list(set(model1.stateIndex_ls).union(set(model2.stateIndex_ls))))
-    mergedTransitionMatrix_ar=np.zeros([len(mergedIndex_ls), len(mergedIndex_ls)], dtype=np.float)
+    
+    m1=model1.transitionMatrix_df*weight
+    m2=model2.transitionMatrix_df*(1-weight)
 
-    for stateFrom in model1.stateIndex_ls:
-        for stateTo in model1.stateIndex_ls:
-            w=weight * model1.transition_weight(stateFrom, stateTo)
-            mergedTransitionMatrix_ar[mergedIndex_ls.index(stateFrom)][mergedIndex_ls.index(stateTo)]+=w
-            
-    for stateFrom in model2.stateIndex_ls:
-        for stateTo in model2.stateIndex_ls:
-            w=(1-weight) * model2.transition_weight(stateFrom, stateTo)
-            mergedTransitionMatrix_ar[mergedIndex_ls.index(stateFrom)][mergedIndex_ls.index(stateTo)]+=w
+    return MarkovModelFromTransitionMatrix((m1.add(m2, fill_value=0)).fillna(0))
 
-    if normalise:
-        for (i, row) in enumerate(mergedTransitionMatrix_ar):
-            if np.sum(row)!=0:
-                mergedTransitionMatrix_ar[i]=row/np.sum(row)
-    
-    # I should do something with the initial states... let's just combine
-    # them like the transition matrices
-    initialStates_ar=np.zeros(len(mergedIndex_ls))
-    for (i, v) in enumerate(model1.initialState_ar):
-        stateIndex_state=model1.stateIndex_ls[i]
-        ms_i=mergedIndex_ls.index(stateIndex_state)
-        initialStates_ar[ms_i]+=weight*v
-    
-    for (i, v) in enumerate(model2.initialState_ar):
-        stateIndex_state=model2.stateIndex_ls[i]
-        ms_i=mergedIndex_ls.index(stateIndex_state)
-        initialStates_ar[ms_i]+=(1-weight)*v
-    
-    if normalise:
-        initialStates_ar=initialStates_ar/np.sum(initialStates_ar)
-    
-    return MarkovModelFromArrays(mergedTransitionMatrix_ar,
-                                 initialStates_ar,
-                                 mergedIndex_ls)
-    
-    
 
+# That's interesting... exporting as python creates a bug with raw cells. Better change them to markdown:
+
+# mm1=MarkovModel([('a', 'b'), ('a', 'c'), ('a', 'c'), ('c', 'b'), ('c', 'a')])
+# mm1.transitionMatrix_df
+
+# mm2=MarkovModel([('b', 'd'), ('d', 'c'), ('d', 'd'), ('c', 'd'), ('b', 'd')])
+# mm2.transitionMatrix_df
+
+# combined_mm=merge(mm1, mm2, 0.3)
+
+# combined_mm.transitionMatrix_df
+
+# s0=combined_mm.create_markov_state(['a'])
+
+# s0.get_current_state_distribution()
+
+# s0.get_path_dataframe()
+
+# s_ms=combined_mm.apply(s0, 5)
+
+# s_ms.get_path_dataframe()
+
+# s_ms.most_likely_path('a')
+
+# So my minimal testing suggests that this is now working reasonably reliably.
